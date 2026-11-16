@@ -242,10 +242,6 @@ class Reaction(commands.GroupCog, group_name="reaction", group_description="Play
     async def bite(self, interaction: discord.Interaction, user: discord.User) -> None:
         await self._send_action(interaction, "bite", user)
 
-    @app_commands.command(name="boop", description="Boop someone's nose")
-    @app_commands.describe(user="Who to boop")
-    async def boop(self, interaction: discord.Interaction, user: discord.User) -> None:
-        await self._send_action(interaction, "boop", user)
 
 
 async def setup(bot: GeneralBot) -> None:

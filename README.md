@@ -47,7 +47,7 @@ The bot supports **both guild installs and user installs**. Fun, reaction, socia
 | `/moderation delwarn` | Delete a specific warning |
 | `/moderation clearwarnings` | Clear every warning for a user |
 | `/moderation purge` | Bulk delete messages (omit amount to delete all available in chunks), optionally filtered by user |
-| `/moderation purgechannel` | Delete and recreate a channel with the same properties |
+| `/moderation purgechannel` | Create a backup channel, hide original, prompt for confirmation (confirm keeps backup/removes original; cancel/timeout removes backup; original stays hidden on timeout) |
 | `/moderation slowmode` | Set or disable slowmode |
 | `/moderation lock` | Stop `@everyone` from sending messages in a channel |
 | `/moderation unlock` | Re-allow `@everyone` to send messages |
@@ -79,7 +79,7 @@ Many member-target prefix commands accept selectors: `all`, `others`, and `@role
 | `?unmute <member\|selector> [reason]` | Remove the `Muted` role |
 | `?purge [amount] [user]` | Delete messages (omit amount to delete available messages in chunks), optionally by user |
 | `?clear [amount] [user]` | Alias for `?purge` |
-| `?purgechannel [channel]` | Delete and recreate a channel with the same properties |
+| `?purgechannel [channel]` | Create a backup channel, hide original, prompt for confirmation (confirm keeps backup/removes original; cancel/timeout removes backup; original stays hidden on timeout) |
 | `?avatar [user]` | Show a user's avatar |
 | `?servericon` | Show the server icon |
 | `?membercount` | Show the server member count |

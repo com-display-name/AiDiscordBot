@@ -278,3 +278,152 @@ class PollView(discord.ui.View):
                 await self.message.edit(embed=self.render_embed(closed=True), view=self)
             except discord.HTTPException:
                 pass
+
+
+class PurgeChannelView(discord.ui.View):
+    def __init__(
+        self,
+        bot,
+        guild: discord.Guild,
+        channel: discord.abc.GuildChannel,
+        backup_channel: discord.abc.GuildChannel,
+        moderator: discord.abc.User,
+        previous_everyone_overwrite: discord.PermissionOverwrite | None,
+        *,
+        timeout: float = 30,
+    ) -> None:
+        super().__init__(timeout=timeout)
+        self.bot = bot
+        self.guild = guild
+        self.channel = channel
+        self.backup_channel = backup_channel
+        self.moderator = moderator
+        self.previous_everyone_overwrite = previous_everyone_overwrite
+        self.message: discord.Message | None = None
+        self.resolved = False
+
+    def _disable(self) -> None:
+        for child in self.children:
+            if isinstance(child, discord.ui.Button):
+                child.disabled = True
+
+    async def _restore_visibility(self) -> None:
+        try:
+            overwrite = self.previous_everyone_overwrite
+            if overwrite is None or overwrite.is_empty():
+                await self.channel.set_permissions(
+                    self.guild.default_role,
+                    overwrite=None,
+                    reason=f"Purgechannel cancelled/timed out handling by {self.moderator}",
+                )
+            else:
+                await self.channel.set_permissions(
+                    self.guild.default_role,
+                    overwrite=overwrite,
+                    reason=f"Purgechannel cancelled by {self.moderator}",
+                )
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+    async def _delete_backup(self) -> None:
+        try:
+            await self.backup_channel.delete(reason=f"Purgechannel backup removed by {self.moderator}")
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+    async def _delete_original(self) -> bool:
+        try:
+            await self.channel.delete(reason=f"Purgechannel confirmed by {self.moderator} ({self.moderator.id})")
+            return True
+        except (discord.Forbidden, discord.HTTPException, AttributeError):
+            return False
+
+    @discord.ui.button(label="Confirm", style=discord.ButtonStyle.danger, emoji="♻️")
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.moderator.id:
+            await interaction.response.send_message("Only the moderator who started this can confirm.", ephemeral=True)
+            return
+        if self.resolved:
+            await interaction.response.send_message("This prompt has already been handled.", ephemeral=True)
+            return
+        self.resolved = True
+        self._disable()
+        embed = base_embed(
+            "♻️ Purging Channel",
+            f"Confirmed. Deleting this channel and keeping the backup {getattr(self.backup_channel, 'mention', '')}.",
+            color=WARNING,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+        deleted = await self._delete_original()
+        if not deleted:
+            # If original couldn't be deleted, keep backup but inform via followup
+            try:
+                await interaction.followup.send(
+                    "Couldn't delete the original channel. The backup channel was kept.",
+                    ephemeral=True,
+                )
+            except discord.HTTPException:
+                pass
+            return
+
+        if isinstance(self.backup_channel, discord.TextChannel):
+            try:
+                await self.backup_channel.send(
+                    embed=base_embed(
+                        "♻️ Channel Purged",
+                        f"Backup channel kept. Original was removed by {self.moderator.mention}.",
+                        color=WARNING,
+                    )
+                )
+            except discord.HTTPException:
+                pass
+
+        log = base_embed("♻️ Channel Purged", color=WARNING)
+        log.add_field(name="Moderator", value=f"{self.moderator.mention} (`{self.moderator.id}`)", inline=False)
+        log.add_field(name="Original Channel", value=f"#{getattr(self.channel, 'name', 'unknown')} (`{getattr(self.channel, 'id', 'unknown')}`)", inline=True)
+        log.add_field(name="Backup Channel", value=getattr(self.backup_channel, "mention", f"`{getattr(self.backup_channel, 'id', 'unknown')}`"), inline=True)
+        try:
+            from .helpers import send_modlog
+            await send_modlog(self.bot, self.guild, log)
+        except Exception:
+            pass
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, emoji="✖️")
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        if interaction.user.id != self.moderator.id:
+            await interaction.response.send_message("Only the moderator who started this can cancel.", ephemeral=True)
+            return
+        if self.resolved:
+            await interaction.response.send_message("This prompt has already been handled.", ephemeral=True)
+            return
+        self.resolved = True
+        self._disable()
+        await self._delete_backup()
+        await self._restore_visibility()
+        embed = base_embed(
+            "Purge Cancelled",
+            "Channel purge cancelled. Backup removed and visibility restored for normal members.",
+            color=SUCCESS,
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+
+    async def on_timeout(self) -> None:
+        if self.resolved:
+            return
+        self.resolved = True
+        self._disable()
+        # Keep original hidden on timeout as requested; remove backup copy.
+        await self._delete_backup()
+        if self.message is not None:
+            embed = base_embed(
+                "⌛ Purge Timed Out",
+                "Confirmation timed out. Backup was removed and this channel will remain hidden from normal members.",
+                color=WARNING,
+            )
+            try:
+                await self.message.edit(embed=embed, view=self)
+            except discord.HTTPException:
+                pass

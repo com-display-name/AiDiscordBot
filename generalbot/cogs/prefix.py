@@ -1148,7 +1148,7 @@ class PrefixCommands(commands.Cog, name="PrefixCommands"):
             await reply_error_ctx(ctx, "This command only works in regular text channels.")
             return False
 
-        check = (lambda message: message.author.id == user.id) if user else None
+        check = (lambda message: message.author.id == user.id) if user else (lambda message: True)
         reason = f"Purged by {ctx.author} ({ctx.author.id})"
         deleted_count = 0
         try:
@@ -1325,38 +1325,65 @@ class PrefixCommands(commands.Cog, name="PrefixCommands"):
             await reply_error_ctx(ctx, "Pick a channel in this server to purge.", title="Invalid channel")
             return
 
-        reason = _audit_reason(ctx, "Channel purge/recreate")
+        previous_overwrite = target.overwrites_for(ctx.guild.default_role)
+        reason = _audit_reason(ctx, "Purgechannel backup")
         try:
-            new_channel = await target.clone(reason=reason)
+            backup_channel = await target.clone(reason=reason)
             try:
-                await new_channel.edit(position=target.position)
+                await backup_channel.edit(position=target.position)
             except (discord.Forbidden, discord.HTTPException):
                 pass
-            await target.delete(reason=reason)
         except discord.Forbidden:
-            await reply_error_ctx(ctx, "I don't have permission to clone or delete that channel.")
+            await reply_error_ctx(ctx, "I don't have permission to clone that channel.")
             return
         except discord.HTTPException as exc:
-            await reply_error_ctx(ctx, f"Discord rejected the channel purge: `{exc}`")
+            await reply_error_ctx(ctx, f"Discord rejected creating the backup channel: `{exc}`")
             return
 
-        if isinstance(new_channel, discord.TextChannel):
+        try:
+            hidden_overwrite = discord.PermissionOverwrite.from_pair(*previous_overwrite.pair())
+            hidden_overwrite.view_channel = False
+            await target.set_permissions(
+                ctx.guild.default_role,
+                overwrite=hidden_overwrite,
+                reason=_audit_reason(ctx, "Purgechannel pending confirmation (hidden)"),
+            )
+        except (discord.Forbidden, discord.HTTPException) as exc:
             try:
-                await new_channel.send(
-                    embed=base_embed(
-                        "♻️ Channel Purged",
-                        f"This channel was recreated by {ctx.author.mention}.",
-                        color=WARNING,
-                    )
-                )
+                await backup_channel.delete(reason="Purgechannel aborted (could not hide original)")
             except discord.HTTPException:
                 pass
+            await reply_error_ctx(ctx, f"Couldn't hide the original channel: `{exc}`. Backup removed.")
+            return
 
-        log = base_embed("♻️ Channel Purged", color=WARNING)
-        log.add_field(name="Moderator", value=f"{ctx.author.mention} (`{ctx.author.id}`)", inline=False)
-        log.add_field(name="Old Channel", value=f"#{target.name} (`{target.id}`)", inline=True)
-        log.add_field(name="New Channel", value=getattr(new_channel, "mention", f"`{new_channel.id}`"), inline=True)
-        await send_modlog(self.bot, ctx.guild, log)
+        from ..views import PurgeChannelView
+
+        prompt_embed = base_embed(
+            "⚠️ Purge Channel?",
+            f"{ctx.author.mention}, this channel is now hidden from normal members and a backup was created: {getattr(backup_channel, 'mention', '`backup`')}.\n\n"
+            "Confirm to **delete this original channel** and keep the backup.\n"
+            "Cancel to **delete the backup** and restore this channel's visibility.\n"
+            "If this times out, the **backup is removed** and this channel will **remain hidden** from normal members.",
+            color=WARNING,
+            footer="You have 30 seconds to confirm · GeneralBot",
+        )
+        view = PurgeChannelView(self.bot, ctx.guild, target, backup_channel, ctx.author, previous_overwrite, timeout=30)
+        try:
+            view.message = await target.send(embed=prompt_embed, view=view)
+        except discord.HTTPException:
+            try:
+                await backup_channel.delete(reason="Purgechannel aborted (could not send prompt)")
+            except discord.HTTPException:
+                pass
+            try:
+                if previous_overwrite.is_empty():
+                    await target.set_permissions(ctx.guild.default_role, overwrite=None)
+                else:
+                    await target.set_permissions(ctx.guild.default_role, overwrite=previous_overwrite)
+            except discord.HTTPException:
+                pass
+            await reply_error_ctx(ctx, "Couldn't send the confirmation prompt in that channel. Backup removed and visibility restored.")
+            return
 
     async def _change_nickname(
         self,
