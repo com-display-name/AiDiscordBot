@@ -663,23 +663,9 @@ class Moderation(commands.GroupCog, group_name="moderation", group_description="
             await reply_error(interaction, "Pick a channel in this server to purge.", title="Invalid channel")
             return
 
-        # Recreate/clone channel first as a backup, then hide original and prompt.
+        # Hide original immediately for normal members, then create a backup and prompt.
         previous_overwrite = target.overwrites_for(guild.default_role)
         await interaction.response.defer(ephemeral=True)
-        reason = audit_reason(interaction, "Purgechannel backup")
-        try:
-            backup_channel = await target.clone(reason=reason)
-            try:
-                await backup_channel.edit(position=target.position)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-        except discord.Forbidden:
-            await reply_error(interaction, "I don't have permission to clone that channel.")
-            return
-        except discord.HTTPException as exc:
-            await reply_error(interaction, f"Discord rejected creating the backup channel: `{exc}`")
-            return
-
         try:
             hidden_overwrite = discord.PermissionOverwrite.from_pair(*previous_overwrite.pair())
             hidden_overwrite.view_channel = False
@@ -688,22 +674,48 @@ class Moderation(commands.GroupCog, group_name="moderation", group_description="
                 overwrite=hidden_overwrite,
                 reason=audit_reason(interaction, "Purgechannel pending confirmation (hidden)"),
             )
-        except (discord.Forbidden, discord.HTTPException) as exc:
+        except discord.Forbidden:
+            await reply_error(interaction, "I don't have permission to edit that channel's permissions.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error(interaction, f"Discord rejected hiding the channel: `{exc}`")
+            return
+
+        reason = audit_reason(interaction, "Purgechannel backup")
+        try:
+            backup_channel = await target.clone(reason=reason)
             try:
-                await backup_channel.delete(reason="Purgechannel aborted (could not hide original)")
+                await backup_channel.edit(position=target.position)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            # Restore backup visibility to original state (clone copied hidden overwrite).
+            try:
+                if previous_overwrite.is_empty():
+                    await backup_channel.set_permissions(guild.default_role, overwrite=None)
+                else:
+                    await backup_channel.set_permissions(guild.default_role, overwrite=previous_overwrite)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            # Restore original visibility if backup creation fails
+            try:
+                if previous_overwrite.is_empty():
+                    await target.set_permissions(guild.default_role, overwrite=None)
+                else:
+                    await target.set_permissions(guild.default_role, overwrite=previous_overwrite)
             except discord.HTTPException:
                 pass
-            await reply_error(interaction, f"Couldn't hide the original channel: `{exc}`. Backup removed.")
+            if isinstance(exc, discord.Forbidden):
+                await reply_error(interaction, "I don't have permission to clone that channel. Visibility restored.")
+            else:
+                await reply_error(interaction, f"Discord rejected creating the backup channel: `{exc}`. Visibility restored.")
             return
 
         from ..views import PurgeChannelView
 
         prompt_embed = base_embed(
             "⚠️ Purge Channel?",
-            f"{interaction.user.mention}, this channel is now hidden from normal members and a backup was created: {getattr(backup_channel, 'mention', '`backup`')}.\n\n"
-            "Confirm to **delete this original channel** and keep the backup.\n"
-            "Cancel to **delete the backup** and restore this channel's visibility.\n"
-            "If this times out, the **backup is removed** and this channel will **remain hidden** from normal members.",
+            "Confirm deleting this channel?\nThere will be a copy made but the messages will be gone.",
             color=WARNING,
             footer="You have 30 seconds to confirm · GeneralBot",
         )
@@ -785,6 +797,136 @@ class Moderation(commands.GroupCog, group_name="moderation", group_description="
         await respond(
             interaction,
             embed=base_embed("📝 Nickname Updated", description, color=SUCCESS),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="addchannel", description="Create a new channel")
+    @app_commands.describe(
+        name="Channel name",
+        channel_type="Type of channel to create",
+        category="Category to place the channel in",
+    )
+    @app_commands.choices(channel_type=[
+        app_commands.Choice(name="text", value="text"),
+        app_commands.Choice(name="voice", value="voice"),
+        app_commands.Choice(name="category", value="category"),
+    ])
+    async def addchannel(
+        self,
+        interaction: discord.Interaction,
+        name: str,
+        channel_type: app_commands.Choice[str] | None = None,
+        category: discord.CategoryChannel | None = None,
+    ) -> None:
+        guild = await require_perms(interaction, manage_channels=True)
+        if guild is None:
+            return
+        if not await require_bot_perms(interaction, manage_channels=True):
+            return
+
+        kind = channel_type.value if channel_type is not None else "text"
+        reason = audit_reason(interaction, "Channel created")
+        try:
+            if kind == "category":
+                created = await guild.create_category(name=name, reason=reason)
+            elif kind == "voice":
+                created = await guild.create_voice_channel(name=name, category=category, reason=reason)
+            else:
+                created = await guild.create_text_channel(name=name, category=category, reason=reason)
+        except discord.Forbidden:
+            await reply_error(interaction, "I don't have permission to create that channel.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error(interaction, f"Discord rejected creating the channel: `{exc}`")
+            return
+
+        mention = getattr(created, "mention", f"`{created.name}`")
+        await respond(
+            interaction,
+            embed=base_embed("✅ Channel Created", f"Created {mention} (`{created.id}`).", color=SUCCESS),
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="removechannel", description="Delete a channel")
+    @app_commands.describe(channel="The channel to delete (defaults to this channel)")
+    async def removechannel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.GuildChannel | None = None,
+    ) -> None:
+        guild = await require_perms(interaction, manage_channels=True)
+        if guild is None:
+            return
+        if not await require_bot_perms(interaction, manage_channels=True):
+            return
+
+        target = channel or interaction.channel
+        if not isinstance(target, discord.abc.GuildChannel) or target.guild != guild:
+            await reply_error(interaction, "Pick a channel in this server to delete.", title="Invalid channel")
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        name = getattr(target, "name", "channel")
+        cid = target.id
+        reason = audit_reason(interaction, "Channel deleted")
+        try:
+            await target.delete(reason=reason)
+        except discord.Forbidden:
+            await reply_error(interaction, "I don't have permission to delete that channel.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error(interaction, f"Discord rejected deleting the channel: `{exc}`")
+            return
+
+        try:
+            await respond(
+                interaction,
+                embed=base_embed("🗑️ Channel Deleted", f"Deleted **#{name}** (`{cid}`).", color=SUCCESS),
+                ephemeral=True,
+            )
+        except discord.HTTPException:
+            pass
+
+    @app_commands.command(name="copychannel", description="Duplicate a channel")
+    @app_commands.describe(
+        channel="The channel to copy (defaults to this channel)",
+        name="Optional name for the new channel",
+    )
+    async def copychannel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.abc.GuildChannel | None = None,
+        name: str | None = None,
+    ) -> None:
+        guild = await require_perms(interaction, manage_channels=True)
+        if guild is None:
+            return
+        if not await require_bot_perms(interaction, manage_channels=True):
+            return
+
+        target = channel or interaction.channel
+        if not isinstance(target, discord.abc.GuildChannel) or target.guild != guild:
+            await reply_error(interaction, "Pick a channel in this server to copy.", title="Invalid channel")
+            return
+
+        reason = audit_reason(interaction, "Channel copied")
+        try:
+            created = await target.clone(name=name, reason=reason) if name else await target.clone(reason=reason)
+            try:
+                await created.edit(position=target.position + 1)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        except discord.Forbidden:
+            await reply_error(interaction, "I don't have permission to copy that channel.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error(interaction, f"Discord rejected copying the channel: `{exc}`")
+            return
+
+        mention = getattr(created, "mention", f"`{getattr(created, 'name', created.id)}`")
+        await respond(
+            interaction,
+            embed=base_embed("📄 Channel Copied", f"Copied to {mention} (`{created.id}`).", color=SUCCESS),
             ephemeral=True,
         )
 

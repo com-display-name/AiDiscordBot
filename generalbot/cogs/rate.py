@@ -30,12 +30,13 @@ class Rate(commands.GroupCog, group_name="rate", group_description="Rate users o
         emoji: str,
         noun: str,
         color: int = BRAND,
+        IsPercentage: bool = True
     ) -> None:
         percent = random.randint(0, 100)
         bar = progress_bar(percent, 100, length=10)
         embed = base_embed(
             f"{emoji} {title}",
-            f"**{user.mention}** has **{percent}%** {noun}.\n\n`{bar}` {percent}%",
+            f"**{user.mention}** has **{percent}%** {noun}.\n\n`{bar}` {percent} {IsPercentage and "%" or ""}",
             color=color,
         )
         embed.set_thumbnail(url=user.display_avatar.url)
@@ -77,18 +78,18 @@ class Rate(commands.GroupCog, group_name="rate", group_description="Rate users o
             color=0x3498DB,
         )
 
-    @app_commands.command(name="ragequit", description="Rate a user's ragequit level")
+    @app_commands.command(name="iq", description="Rate a user's IQ")
     @app_commands.describe(user="The user to rate")
-    async def ragequit(self, interaction: discord.Interaction, user: discord.User) -> None:
+    async def skill(self, interaction: discord.Interaction, user: discord.User) -> None:
         await self._send_rating(
             interaction,
             user,
-            title="Ragequit Rating",
-            emoji="💢",
-            noun="ragequit energy",
-            color=0xE74C3C,
+            title="IQ Rating",
+            emoji="🧠",
+            noun="IQ",
+            color=0x3498DB,
+            IsPercentage=False
         )
-
 
 async def setup(bot: GeneralBot) -> None:
     await bot.add_cog(Rate(bot))

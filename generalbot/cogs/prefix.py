@@ -161,9 +161,9 @@ class PrefixCommands(commands.Cog, name="PrefixCommands"):
             "⌨️ Prefix Commands",
             "I accept `?`, `.`, `'`, `;`, and `!` prefixes.\n"
             "Examples: `?ban @user`, `.kick @user`, `'timeout @user 10m`, `;mute @user 10m`, `;tempban @user 1d`, `;warn @user`.\n\n"
-            "**Moderation:** `ban`, `tempban`, `unban`, `kick`, `timeout`, `mute`, `untimeout`, "
-            "`unmute`, `warn`, `warnings`, `delwarn`, `clearwarnings`, `purge`, `clear`, "
-            "`slowmode`, `lock`, `unlock`, `nickname`, `setname`\n\n"
+            "**Moderation/Channels:** `ban`, `tempban`, `unban`, `kick`, `timeout`, `mute`, `untimeout`, "
+            "`unmute`, `warn`, `warnings`, `delwarn`, `clearwarnings`, `purge`, `clear`, `purgechannel`, "
+            "`addchannel`, `removechannel`, `copychannel`, `slowmode`, `lock`, `unlock`, `nickname`, `setname`\n\n"
             "Selectors: `all`, `others`, and `@role` work on many member-target commands (e.g. `?mute @role 10m`).\n"
             "Durations: `0` (or `0m`/`0h`/`0d`) means infinite for `mute` and `tempban`.\n\n"
             "**Roles:** `role <member|selector> <role>` (toggle), `role add`, `role remove`, `role list`, `role info`, `addrole`, "
@@ -1326,20 +1326,6 @@ class PrefixCommands(commands.Cog, name="PrefixCommands"):
             return
 
         previous_overwrite = target.overwrites_for(ctx.guild.default_role)
-        reason = _audit_reason(ctx, "Purgechannel backup")
-        try:
-            backup_channel = await target.clone(reason=reason)
-            try:
-                await backup_channel.edit(position=target.position)
-            except (discord.Forbidden, discord.HTTPException):
-                pass
-        except discord.Forbidden:
-            await reply_error_ctx(ctx, "I don't have permission to clone that channel.")
-            return
-        except discord.HTTPException as exc:
-            await reply_error_ctx(ctx, f"Discord rejected creating the backup channel: `{exc}`")
-            return
-
         try:
             hidden_overwrite = discord.PermissionOverwrite.from_pair(*previous_overwrite.pair())
             hidden_overwrite.view_channel = False
@@ -1348,22 +1334,48 @@ class PrefixCommands(commands.Cog, name="PrefixCommands"):
                 overwrite=hidden_overwrite,
                 reason=_audit_reason(ctx, "Purgechannel pending confirmation (hidden)"),
             )
-        except (discord.Forbidden, discord.HTTPException) as exc:
+        except discord.Forbidden:
+            await reply_error_ctx(ctx, "I don't have permission to edit that channel's permissions.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error_ctx(ctx, f"Discord rejected hiding the channel: `{exc}`")
+            return
+
+        reason = _audit_reason(ctx, "Purgechannel backup")
+        try:
+            backup_channel = await target.clone(reason=reason)
             try:
-                await backup_channel.delete(reason="Purgechannel aborted (could not hide original)")
+                await backup_channel.edit(position=target.position)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            # Restore backup visibility to original state (clone copied hidden overwrite).
+            try:
+                if previous_overwrite.is_empty():
+                    await backup_channel.set_permissions(ctx.guild.default_role, overwrite=None)
+                else:
+                    await backup_channel.set_permissions(ctx.guild.default_role, overwrite=previous_overwrite)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            # Restore original visibility if backup creation fails
+            try:
+                if previous_overwrite.is_empty():
+                    await target.set_permissions(ctx.guild.default_role, overwrite=None)
+                else:
+                    await target.set_permissions(ctx.guild.default_role, overwrite=previous_overwrite)
             except discord.HTTPException:
                 pass
-            await reply_error_ctx(ctx, f"Couldn't hide the original channel: `{exc}`. Backup removed.")
+            if isinstance(exc, discord.Forbidden):
+                await reply_error_ctx(ctx, "I don't have permission to clone that channel. Visibility restored.")
+            else:
+                await reply_error_ctx(ctx, f"Discord rejected creating the backup channel: `{exc}`. Visibility restored.")
             return
 
         from ..views import PurgeChannelView
 
         prompt_embed = base_embed(
             "⚠️ Purge Channel?",
-            f"{ctx.author.mention}, this channel is now hidden from normal members and a backup was created: {getattr(backup_channel, 'mention', '`backup`')}.\n\n"
-            "Confirm to **delete this original channel** and keep the backup.\n"
-            "Cancel to **delete the backup** and restore this channel's visibility.\n"
-            "If this times out, the **backup is removed** and this channel will **remain hidden** from normal members.",
+            "Confirm deleting this channel?\nThere will be a copy made but the messages will be gone.",
             color=WARNING,
             footer="You have 30 seconds to confirm · GeneralBot",
         )
@@ -2019,6 +2031,109 @@ class PrefixCommands(commands.Cog, name="PrefixCommands"):
         )
         embed.set_footer(text="GeneralBot · server info")
         await reply_ctx(ctx, embed=embed)
+
+    @commands.command(name="addchannel", usage="<name> [text|voice|category] [category]")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_channels=True)
+    async def addchannel(
+        self,
+        ctx: commands.Context,
+        name: str,
+        channel_type: str = "text",
+        category: discord.CategoryChannel | None = None,
+    ) -> None:
+        if not await require_bot_perms_ctx(ctx, manage_channels=True):
+            return
+
+        kind = channel_type.lower()
+        if kind not in {"text", "voice", "category"}:
+            await reply_error_ctx(ctx, "Channel type must be `text`, `voice`, or `category`.")
+            return
+
+        reason = _audit_reason(ctx, "Channel created")
+        try:
+            if kind == "category":
+                created = await ctx.guild.create_category(name=name, reason=reason)
+            elif kind == "voice":
+                created = await ctx.guild.create_voice_channel(name=name, category=category, reason=reason)
+            else:
+                created = await ctx.guild.create_text_channel(name=name, category=category, reason=reason)
+        except discord.Forbidden:
+            await reply_error_ctx(ctx, "I don't have permission to create that channel.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error_ctx(ctx, f"Discord rejected creating the channel: `{exc}`")
+            return
+
+        mention = getattr(created, "mention", f"`{created.name}`")
+        await reply_success_ctx(ctx, "Channel Created", f"Created {mention} (`{created.id}`).")
+
+    @commands.command(name="removechannel", usage="[channel]")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_channels=True)
+    async def removechannel(
+        self,
+        ctx: commands.Context,
+        channel: discord.abc.GuildChannel | None = None,
+    ) -> None:
+        if not await require_bot_perms_ctx(ctx, manage_channels=True):
+            return
+
+        target = channel or ctx.channel
+        if not isinstance(target, discord.abc.GuildChannel) or target.guild != ctx.guild:
+            await reply_error_ctx(ctx, "Pick a channel in this server to delete.", title="Invalid channel")
+            return
+
+        name = getattr(target, "name", "channel")
+        cid = target.id
+        reason = _audit_reason(ctx, "Channel deleted")
+        try:
+            await target.delete(reason=reason)
+        except discord.Forbidden:
+            await reply_error_ctx(ctx, "I don't have permission to delete that channel.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error_ctx(ctx, f"Discord rejected deleting the channel: `{exc}`")
+            return
+
+        # If we deleted the command channel, we can't reply there.
+        if target.id != ctx.channel.id:
+            await reply_success_ctx(ctx, "Channel Deleted", f"Deleted **#{name}** (`{cid}`).")
+
+    @commands.command(name="copychannel", usage="[channel] [new_name]")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_channels=True)
+    async def copychannel(
+        self,
+        ctx: commands.Context,
+        channel: discord.abc.GuildChannel | None = None,
+        *,
+        name: str | None = None,
+    ) -> None:
+        if not await require_bot_perms_ctx(ctx, manage_channels=True):
+            return
+
+        target = channel or ctx.channel
+        if not isinstance(target, discord.abc.GuildChannel) or target.guild != ctx.guild:
+            await reply_error_ctx(ctx, "Pick a channel in this server to copy.", title="Invalid channel")
+            return
+
+        reason = _audit_reason(ctx, "Channel copied")
+        try:
+            created = await target.clone(name=name, reason=reason) if name else await target.clone(reason=reason)
+            try:
+                await created.edit(position=getattr(target, "position", 0) + 1)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+        except discord.Forbidden:
+            await reply_error_ctx(ctx, "I don't have permission to copy that channel.")
+            return
+        except discord.HTTPException as exc:
+            await reply_error_ctx(ctx, f"Discord rejected copying the channel: `{exc}`")
+            return
+
+        mention = getattr(created, "mention", f"`{getattr(created, 'name', created.id)}`")
+        await reply_success_ctx(ctx, "Channel Copied", f"Copied to {mention} (`{created.id}`).")
 
 
 async def setup(bot: GeneralBot) -> None:
